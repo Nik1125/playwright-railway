@@ -13,8 +13,10 @@ const DEFAULT_UA = process.env.DEFAULT_UA || "Mozilla/5.0 (Windows NT 10.0; Win6
 // --- simple bearer auth middleware ---
 app.use((req, res, next) => {
   if (!AUTH_TOKEN) return next();
-  const h = req.headers.authorization || "";
-  if (h !== `Bearer ${AUTH_TOKEN}`) return res.status(401).json({ error: "unauthorized" });
+  const header = req.headers.authorization || "";
+  const bearer = header.replace(/^Bearer\s+/i, "");
+  const token = bearer || (typeof req.query.token === "string" ? req.query.token : "");
+  if (token !== AUTH_TOKEN) return res.status(401).json({ error: "unauthorized" });
   next();
 });
 
