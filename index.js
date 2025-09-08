@@ -186,7 +186,7 @@ app.post("/run", (req, res) => enqueue(async () => {
     else if (action === "notificationsSubscribersLinks") {
       const timeoutMs = Math.min(parseInt(req.body?.timeoutMs ?? 30000, 10) || 30000, 120000);
       const max = Math.min(parseInt(req.body?.max ?? 300, 10) || 300, 2000);
-      const todayOnly = true; // собираем только блок «Сегодня/Today»
+      const todayOnly = (req.body?.todayOnly ?? true) ? true : false;
       // Переходим на публичную страницу уведомлений
       await page.goto('https://www.instagram.com/notifications/', { waitUntil: 'domcontentloaded' }).catch(()=>{});
 
@@ -206,50 +206,52 @@ app.post("/run", (req, res) => enqueue(async () => {
         await page.waitForTimeout(350 + Math.floor(Math.random()*250));
       }
 
-      async function collectTodaySection() {
-        return await page.evaluate(() => {
-          function findTodayHeading() {
-            const candidates = Array.from(document.querySelectorAll('[role="heading"], h1, h2, h3, div[role="heading"]'));
-            return candidates.find(el => /^(сегодня|today)\b/i.test((el.textContent || '').trim()));
-          }
-          const todayHeading = findTodayHeading();
-          if (!todayHeading) return [];
-          // собрать узлы раздела до следующего заголовка
-          const sectionNodes = [];
-          let node = todayHeading.parentElement?.nextElementSibling || todayHeading.nextElementSibling;
-          while (node) {
-            const isHeading = node.matches?.('[role="heading"], h1, h2, h3, div[role="heading"]');
-            if (isHeading) break;
-            sectionNodes.push(node);
-            node = node.nextElementSibling;
-          }
+      async function collectOnce() {
+        return await page.evaluate((todayOnlyEval) => {
           const items = [];
-          const searchRoots = sectionNodes.length ? sectionNodes : [todayHeading.parentElement || document.body];
-          for (const root of searchRoots) {
-            const blocks = Array.from(root.querySelectorAll('[data-pressable-container="true"]'));
-            for (const b of blocks) {
-              const a = b.querySelector('a[href^="/"]');
-              if (!a) continue;
-              const href = a.getAttribute('href') || '';
-              const m = href.match(/^\/([^\/\?]+)\/?/);
-              const username = m ? m[1] : null;
-              if (!username) continue;
-              const text = (b.textContent || '').trim();
-              items.push({ username, href, text });
-            }
+          const blocks = Array.from(document.querySelectorAll('[data-pressable-container="true"]'));
+          const isTodayByText = (t) => {
+            if (!todayOnlyEval) return true;
+            const s = (t || "").toLowerCase();
+            // Russian
+            if (/\bсегодня\b/.test(s)) return true;
+            if (/(\d+)\s*(мин\.|мин|м)/.test(s)) return true;
+            const hm = s.match(/(\d+)\s*(час|часа|ч)\b/);
+            if (hm) { const n = parseInt(hm[1],10); return !isNaN(n) && n < 24; }
+            if (/(\d+)\s*(дн\.|дн|д)/.test(s)) return false;
+            if (/(нед|week)/.test(s)) return false;
+            if (/(мес|month)/.test(s)) return false;
+            // English
+            if (/(\d+)\s*(m|min|mins|minute|minutes)\b/.test(s)) return true;
+            const he = s.match(/(\d+)\s*(h|hr|hrs|hour|hours)\b/);
+            if (he) { const n = parseInt(he[1],10); return !isNaN(n) && n < 24; }
+            if (/(\d+)\s*(d|day|days)\b/.test(s)) return false;
+            return false; // default: not sure -> exclude
+          };
+          for (const b of blocks) {
+            const a = b.querySelector('a[href^="/"]');
+            if (!a) continue;
+            const href = a.getAttribute('href') || '';
+            const m = href.match(/^\/([^\/\?]+)\/?/);
+            const username = m ? m[1] : null;
+            if (!username) continue;
+            const text = (b.textContent || '').trim();
+            // try to extract trailing small time text from a descendant if exists
+            const timeNode = b.querySelector('time, span, div');
+            const timeText = (timeNode && (timeNode.getAttribute?.('datetime') || timeNode.textContent)) ? (timeNode.getAttribute?.('datetime') || timeNode.textContent || '').trim() : '';
+            const tJoin = [text, timeText].filter(Boolean).join(' ');
+            if (!isTodayByText(tJoin)) continue;
+            items.push({ username, href, text, timeText });
           }
           return Array.from(new Map(items.map(i => [i.username+"|"+i.text, i])).values());
-        });
+        }, todayOnly);
       }
 
       const started = Date.now();
       const map = new Map();
-      let last = 0, still = 0;
-      while ((Date.now() - started) < timeoutMs && map.size < max && still < 4) {
-        const batch = await collectTodaySection();
+      while ((Date.now() - started) < timeoutMs && map.size < max) {
+        const batch = await collectOnce();
         batch.forEach(i => map.set(i.username+"|"+i.text, i));
-        if (map.size === last) still++; else still = 0;
-        last = map.size;
         await scrollDown();
       }
 
