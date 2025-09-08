@@ -185,32 +185,9 @@ app.post("/run", (req, res) => enqueue(async () => {
     }
     else if (action === "notificationsSubscribersLinks") {
       const timeoutMs = Math.min(parseInt(req.body?.timeoutMs ?? 30000, 10) || 30000, 120000);
-      await page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
-
-      // попытка найти пункт меню «Уведомления»/"Notifications" и красную точку (есть активные уведомления)
-      const notifNav = page.locator([
-        'a[role="link"][href^="/accounts/activity/"]',
-        'a[aria-label="Уведомления"]',
-        'a[aria-label="Notifications"]',
-        'a[role="link"]:has-text("Уведомления")',
-        'a[role="link"]:has-text("Notifications")'
-      ].join(', ')).first();
-      const hasNotif = await (async () => {
-        try {
-          if (!(await notifNav.count())) return false;
-          const red = notifNav.locator('[aria-label*="нов" i], [style*="rgb(237, 73, 86)"]');
-          return (await red.count()) > 0;
-        } catch { return false; }
-      })();
-
-      out.hasNotifications = hasNotif; // но сбор всё равно попытаемся сделать
-
-      // открыть список уведомлений: клик по иконке, иначе прямой переход
-      if (await notifNav.count()) {
-        try { await notifNav.click({ timeout: 5000 }); } catch {}
-      } else {
-        await page.goto('https://www.instagram.com/accounts/activity/', { waitUntil: 'domcontentloaded' }).catch(()=>{});
-      }
+      const max = Math.min(parseInt(req.body?.max ?? 300, 10) || 300, 2000);
+      // Переходим на публичную страницу уведомлений
+      await page.goto('https://www.instagram.com/notifications/', { waitUntil: 'domcontentloaded' }).catch(()=>{});
 
       // если нас перекинуло на логин — сообщаем явно и выходим
       const redirectedToLogin = /\/accounts\/login\//.test(page.url());
@@ -222,56 +199,41 @@ app.post("/run", (req, res) => enqueue(async () => {
         return res.json(out);
       }
 
-      {
-        const dialog = page.locator('div[role="dialog"]').first();
-        await dialog.waitFor({ state: "visible", timeout: 8000 }).catch(()=>{});
-
-        // нажать «Фильтровать»
-        const filterBtn = page.locator('div[role="button"]:has-text("Фильтровать"), button:has-text("Фильтровать")').first();
-        try { await filterBtn.click({ timeout: 5000 }); } catch {}
-
-        // отметить чекбокс «Подписки» (или похожее слово)
-        const subCb = page.getByRole?.("checkbox", { name: /подпис/iu }) ?? page.locator('input[type="checkbox"]').locator('xpath=..').locator(':has-text("Подпис")');
-        try { if (await subCb.count()) { await subCb.first().check?.().catch(async()=>{ await subCb.first().click(); }); } } catch {}
-
-        // «Применить»
-        const applyBtn = page.locator('div[role="button"]:has-text("Применить"), button:has-text("Применить")').first();
-        try { await applyBtn.click({ timeout: 5000 }); } catch {}
-
-        // сбор ссылок из модалки
-        const started = Date.now();
-        const links = await (async () => {
-          const items = new Map();
-          while ((Date.now() - started) < timeoutMs) {
-            const batch = await page.evaluate(() => {
-              const root = document.querySelector('div[role="dialog"]') || document;
-              const anchors = Array.from(root.querySelectorAll('a[href^="/"]'));
-              const out = [];
-              for (const a of anchors) {
-                const h = a.getAttribute('href') || '';
-                if (!/^\/[A-Za-z0-9._]+\/?(\?[^#]*)?$/.test(h)) continue;
-                const uname = (h.match(/^\/([^\/\?]+)\//) || [null, null])[1];
-                if (!uname) continue;
-                const text = (a.textContent || '').trim();
-                out.push({ username: uname, href: h, text });
-              }
-              return out;
-            });
-            batch.forEach(i => items.set(i.username, i));
-            // прокрутка списка уведомлений вниз
-            const el = await dialog.elementHandle().catch(()=>null);
-            if (el) { await page.evaluate(e => e.scrollBy(0, e.scrollHeight), el).catch(()=>{}); }
-            await page.waitForTimeout(300);
-            if (items.size >= 100) break; // безопасный предел
-          }
-          return Array.from(items.values());
-        })();
-
-        out.links = links;
-        out.count = links.length;
-        out.hadModal = true;
-        out.ok = true;
+      // авто‑скролл страницы и сбор уведомлений
+      async function scrollDown() {
+        await page.evaluate(() => window.scrollBy(0, document.documentElement.scrollHeight));
+        await page.waitForTimeout(350 + Math.floor(Math.random()*250));
       }
+
+      async function collectOnce() {
+        return await page.evaluate(() => {
+          const items = [];
+          const blocks = Array.from(document.querySelectorAll('[data-pressable-container="true"]'));
+          for (const b of blocks) {
+            const a = b.querySelector('a[href^="/"]');
+            if (!a) continue;
+            const href = a.getAttribute('href') || '';
+            const m = href.match(/^\/([^\/\?]+)\/?/);
+            const username = m ? m[1] : null;
+            if (!username) continue;
+            const text = (b.textContent || '').trim();
+            items.push({ username, href, text });
+          }
+          return Array.from(new Map(items.map(i => [i.username+"|"+i.text, i])).values());
+        });
+      }
+
+      const started = Date.now();
+      const map = new Map();
+      while ((Date.now() - started) < timeoutMs && map.size < max) {
+        const batch = await collectOnce();
+        batch.forEach(i => map.set(i.username+"|"+i.text, i));
+        await scrollDown();
+      }
+
+      out.links = Array.from(map.values());
+      out.count = out.links.length;
+      out.ok = true;
     }
      else {
       throw new Error(`unknown action: ${action}`);
