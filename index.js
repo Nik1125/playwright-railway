@@ -67,7 +67,7 @@ app.post("/seed-cookies", (req, res) => enqueue(async () => {
 
 // universal runner with few actions
 app.post("/run", (req, res) => enqueue(async () => {
-  const { action = "loginCheck", username, targetUser, needScreenshot = false } = req.body || {};
+  const { action = "loginCheck", username, targetUser, needScreenshot = true } = req.body || {};
   const context = await ensureContext();
 
   const page = await context.newPage();
@@ -187,8 +187,14 @@ app.post("/run", (req, res) => enqueue(async () => {
       const timeoutMs = Math.min(parseInt(req.body?.timeoutMs ?? 30000, 10) || 30000, 120000);
       await page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
 
-      // попытка найти пункт меню «Уведомления» и красную точку (есть активные уведомления)
-      const notifNav = page.locator('a[role="link"]:has-text("Уведомления"), a[aria-label="Уведомления"]').first();
+      // попытка найти пункт меню «Уведомления»/"Notifications" и красную точку (есть активные уведомления)
+      const notifNav = page.locator([
+        'a[role="link"][href^="/accounts/activity/"]',
+        'a[aria-label="Уведомления"]',
+        'a[aria-label="Notifications"]',
+        'a[role="link"]:has-text("Уведомления")',
+        'a[role="link"]:has-text("Notifications")'
+      ].join(', ')).first();
       const hasNotif = await (async () => {
         try {
           if (!(await notifNav.count())) return false;
@@ -197,10 +203,16 @@ app.post("/run", (req, res) => enqueue(async () => {
         } catch { return false; }
       })();
 
-      out.hasNotifications = hasNotif;
-      if (!hasNotif) { out.ok = true; out.links = []; out.count = 0; }
-      else {
+      out.hasNotifications = hasNotif; // но сбор всё равно попытаемся сделать
+
+      // открыть список уведомлений: клик по иконке, иначе прямой переход
+      if (await notifNav.count()) {
         try { await notifNav.click({ timeout: 5000 }); } catch {}
+      } else {
+        await page.goto('https://www.instagram.com/accounts/activity/', { waitUntil: 'domcontentloaded' }).catch(()=>{});
+      }
+
+      {
         const dialog = page.locator('div[role="dialog"]').first();
         await dialog.waitFor({ state: "visible", timeout: 8000 }).catch(()=>{});
 
