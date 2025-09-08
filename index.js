@@ -96,8 +96,13 @@ app.post("/run", (req, res) => enqueue(async () => {
       out.url = page.url();
 
     } else if (action === "followersLinks") {
+      const max = Math.min(parseInt(req.body?.max ?? 300, 10) || 300, 2000);      // сколько максимум собрать
+      const timeoutMs = Math.min(parseInt(req.body?.timeoutMs ?? 30000, 10) || 30000, 120000); // общий таймаут
+    
       if (!username) throw new Error("username required");
       await page.goto(`https://www.instagram.com/${username}/`, { waitUntil: "domcontentloaded" });
+    
+      // открыть followers (клик или прямой переход)
       const sels = [
         `a[href='/${username}/followers/']`,
         `a[href^='/${username}/followers']`,
@@ -110,31 +115,75 @@ app.post("/run", (req, res) => enqueue(async () => {
         if (await loc.count()) {
           try {
             await loc.scrollIntoViewIfNeeded();
-            await Promise.race([page.waitForNavigation({ waitUntil: "domcontentloaded" }).catch(()=>{}), loc.click()]);
+            await Promise.race([ page.waitForNavigation({ waitUntil: "domcontentloaded" }).catch(()=>{}), loc.click() ]);
             clicked = true; break;
           } catch {}
         }
       }
-      if (!clicked) await page.goto(`https://www.instagram.com/${username}/followers/`, { waitUntil: "domcontentloaded" }).catch(()=>{});
-      try { await page.locator('div[role="dialog"]').first().waitFor({ state: "visible", timeout: 7000 }); } catch {}
-      out.links = await page.evaluate(() => {
-        const root = document.querySelector('div[role="dialog"]') || document;
-        const A = [...root.querySelectorAll('a[href^="/"]')];
-        const arr = [];
-        for (const a of A) {
-          const h = a.getAttribute("href");
-          if (!h) continue;
-          if (/^\/(accounts|explore|p|reel|direct|stories)\//.test(h)) continue;
-          if (!/^\/[^\/\?#]+\/(\?[^#]*)?$/.test(h)) continue;
-          const text = (a.textContent || "").trim();
-          arr.push({ href: h, text });
+      if (!clicked) {
+        await page.goto(`https://www.instagram.com/${username}/followers/`, { waitUntil: "domcontentloaded" }).catch(()=>{});
+      }
+    
+      // есть ли модалка?
+      const hadModal = await page.locator('div[role="dialog"]').first().count().then(n=>n>0).catch(()=>false);
+    
+      // Находим скроллируемый контейнер (в модалке или весь документ)
+      const scrollHandle = hadModal
+        ? await page.locator('div[role="dialog"]').first().elementHandle()
+        : null;
+    
+      // функция прокрутки
+      async function scrollStep() {
+        if (scrollHandle) {
+          await page.evaluate(el => { el.scrollBy(0, el.scrollHeight); }, scrollHandle);
+        } else {
+          await page.evaluate(() => window.scrollBy(0, document.documentElement.scrollHeight));
         }
-        return Array.from(new Map(arr.map(o => [o.href, o])).values());
-      });
-      if (targetUser) out.foundTarget = out.links.some(x => x.href.startsWith(`/${targetUser}/`));
-      out.ok = (out.links?.length || 0) > 0;
-
-    } else {
+        await page.waitForTimeout(400 + Math.floor(Math.random() * 400));
+      }
+    
+      // сбор одного «батча» ссылок
+      async function collectOnce() {
+        return await page.evaluate(() => {
+          const root = document.querySelector('div[role="dialog"]') || document;
+          const anchors = Array.from(root.querySelectorAll('a[role="link"][href^="/"], a[href^="/"]'));
+          const items = [];
+          for (const a of anchors) {
+            const h = a.getAttribute("href");
+            if (!h) continue;
+            // отсекаем системные пути
+            if (/^\/(accounts|explore|p|reel|reels|direct|stories)\//.test(h)) continue;
+            // профиль: /username/ или /username/?...
+            const m = h.match(/^\/([^\/\?]+)\/(\?[^#]*)?$/);
+            if (!m) continue;
+            const uname = m[1];
+            const text = (a.textContent || "").trim();
+            items.push({ username: uname, href: h, text });
+          }
+          // уникализируем по username
+          return Array.from(new Map(items.map(i => [i.username, i])).values());
+        });
+      }
+    
+      const started = Date.now();
+      const linksMap = new Map();
+      let lastSize = 0, still = 0;
+    
+      while (linksMap.size < max && (Date.now() - started) < timeoutMs && still < 4) {
+        const batch = await collectOnce();
+        batch.forEach(i => linksMap.set(i.username, i));
+        if (linksMap.size === lastSize) still++; else still = 0;
+        lastSize = linksMap.size;
+        await scrollStep();
+      }
+    
+      out.links = Array.from(linksMap.values());
+      out.count = out.links.length;
+      out.hadModal = hadModal;
+      out.reachedEnd = still >= 4 || (Date.now() - started) >= timeoutMs || linksMap.size >= max;
+      out.ok = out.count > 0;
+    }
+     else {
       throw new Error(`unknown action: ${action}`);
     }
 
