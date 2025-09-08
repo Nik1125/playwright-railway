@@ -270,47 +270,78 @@ app.post("/run", (req, res) => enqueue(async () => {
       out.ok = true;
     }
     else if (action === "sendMessage") {
-      const { message, profileUrl } = req.body || {};
+      const { message, profileUrl, threadId, directUrl } = req.body || {};
       const uname = username || (typeof req.body?.username === "string" ? req.body.username : "");
-      if (!message || !(uname || profileUrl)) throw new Error("username or profileUrl and message required");
+      if (!message || !(uname || profileUrl || threadId || directUrl)) throw new Error("username/profileUrl/threadId required with message");
 
-      const url = profileUrl || `https://www.instagram.com/${uname}/`;
-      await page.goto(url, { waitUntil: "domcontentloaded" });
+      // 0) Если задали прямую ссылку на тред — используем её
+      const targetUrl = directUrl || (threadId ? `https://www.instagram.com/direct/t/${threadId}/` : (profileUrl || `https://www.instagram.com/${uname}/`));
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
 
-      // если редирект на логин
       if (/\/accounts\/login\//.test(page.url())) {
         out.needLogin = true; out.ok = false; out.url = page.url();
         return res.json(out);
       }
 
-      // открыть меню (три точки)
-      const menuBtn = page.locator([
-        'button[role="button"]:has(svg[aria-label])',
-        'div[role="button"]:has(svg[aria-label])',
-        'button:has-text("...")',
-      ].join(', ')).filter({ hasText: /\.{3}/ }).first().or(
-        page.getByRole?.("button", { name: /парамет|ещё|more|options|menu/i })
-      );
-      try { await menuBtn.click({ timeout: 5000 }); } catch {}
+      // 1) Если мы уже на странице треда, сразу ищем composer
+      const onThread = /\/direct\/t\//.test(page.url());
+      if (!onThread) {
+        // открыть меню (три точки) и кликнуть «Отправить сообщение»
+        const menuBtn = page.locator([
+          'button[role="button"]:has(svg[aria-label])',
+          'div[role="button"]:has(svg[aria-label])',
+          'button:has-text("...")',
+        ].join(', ')).filter({ hasText: /\.{3}/ }).first().or(
+          page.getByRole?.("button", { name: /парамет|ещё|more|options|menu/i })
+        );
+        try { await menuBtn.click({ timeout: 5000 }); } catch {}
 
-      // выбрать пункт «Отправить сообщение» / "Send message"
-      const sendItem = page.locator([
-        'div[role="dialog"] [role="menuitem"]:has-text("Отправить сообщение")',
-        'div[role="dialog"] button:has-text("Отправить сообщение")',
-        'div[role="dialog"] [role="menuitem"]:has-text("Send message")',
-        'div[role="dialog"] button:has-text("Send message")',
-        'div[role="menuitem"]:has-text("Send message")',
+        const sendItem = page.locator([
+          'div[role="dialog"] [role="menuitem"]:has-text("Отправить сообщение")',
+          'div[role="dialog"] button:has-text("Отправить сообщение")',
+          'div[role="dialog"] [role="menuitem"]:has-text("Send message")',
+          'div[role="dialog"] button:has-text("Send message")'
+        ].join(', ')).first();
+        try { await sendItem.click({ timeout: 6000 }); } catch {}
+      }
+
+      // 2) Явный поиск композера и кнопки «Отправить» на странице треда
+      const composer = page.locator('[placeholder*="Напишите" i], [placeholder*="message" i], [contenteditable="true"][role="textbox"], div[contenteditable="true"], textarea').first();
+      await composer.waitFor({ state: "visible", timeout: 12000 }).catch(()=>{});
+      await composer.click({ delay: 40 }).catch(()=>{});
+      // очистка и ввод
+      try { await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control'); await page.keyboard.press('Backspace'); } catch {}
+      await composer.type(String(message), { delay: 20 }).catch(()=>{});
+
+      // кнопка отправки: текстовая или иконка «бумажный самолётик»
+      const sendBtn = page.locator([
+        'button[role="button"]:has-text("Send")',
+        'button[role="button"]:has-text("Отправить")',
+        '[role="button"]:has(svg[aria-label*="Send" i])',
+        '[role="button"]:has(svg[aria-label*"Отправить" i])'
       ].join(', ')).first();
-      try { await sendItem.click({ timeout: 6000 }); } catch {}
+      if (await sendBtn.count().catch(()=>0)) {
+        await sendBtn.click().catch(()=>{});
+      } else {
+        await composer.press('Enter').catch(()=>{});
+      }
 
-      // ждать открытие чата и поле ввода
-      const composer = page.locator('[contenteditable="true"], textarea').first();
-      await composer.waitFor({ state: "visible", timeout: 10000 }).catch(()=>{});
-      await composer.click({ delay: 50 }).catch(()=>{});
-      await composer.type(String(message), { delay: 15 }).catch(()=>{});
-      await composer.press('Enter').catch(()=>{});
+      // 3) подтверждение по последнему пузырю
+      async function lastBubbleText() {
+        return await page.evaluate(() => {
+          const candidates = Array.from(document.querySelectorAll('[role="row"], [data-testid*="message"]'));
+          const txts = candidates.map(el => (el.textContent || '').trim()).filter(Boolean);
+          return txts.length ? txts[txts.length - 1] : '';
+        });
+      }
+      let confirmed = false; const started = Date.now();
+      while (Date.now() - started < 6000) {
+        const t = await lastBubbleText().catch(()=>'');
+        if (t && t.includes(String(message))) { confirmed = true; break; }
+        await page.waitForTimeout(250);
+      }
 
-      out.sent = true; out.target = uname || profileUrl; out.ok = true;
+      out.sent = confirmed; out.confirmed = confirmed; out.target = uname || profileUrl || threadId || directUrl; out.ok = confirmed;
     }
      else {
       throw new Error(`unknown action: ${action}`);
