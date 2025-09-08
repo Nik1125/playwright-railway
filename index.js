@@ -267,8 +267,8 @@ app.post("/run", (req, res) => enqueue(async () => {
 
       out.links = Array.from(map.values());
       out.count = out.links.length;
-      out.ok = true;
-    }
+        out.ok = true;
+      }
     else if (action === "sendMessage") {
       const { message, profileUrl, threadId, directUrl } = req.body || {};
       const uname = username || (typeof req.body?.username === "string" ? req.body.username : "");
@@ -286,7 +286,31 @@ app.post("/run", (req, res) => enqueue(async () => {
       // 1) Если мы уже на странице треда, сразу ищем composer
       const onThread = /\/direct\/t\//.test(page.url());
       if (!onThread) {
-        // открыть меню (три точки) и кликнуть «Отправить сообщение»
+        // 1a) Сначала пробуем явную кнопку «Отправить сообщение»/Message на профиле
+        let opened = false;
+        const directBtn = page.locator([
+          '[role="button"]:has-text("Отправить сообщение")',
+          'button:has-text("Отправить сообщение")',
+          'a[role="button"]:has-text("Отправить сообщение")',
+          'a[role="link"]:has-text("Отправить сообщение")',
+          '[role="button"]:has-text("Send message")',
+          'button:has-text("Send message")',
+          '[role="button"]:has-text("Message")',
+          'button:has-text("Message")'
+        ].join(', ')).first();
+        if (await directBtn.count().catch(()=>0)) {
+          try {
+            await directBtn.scrollIntoViewIfNeeded().catch(()=>{});
+            await Promise.race([
+              page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(()=>{}),
+              directBtn.click({ timeout: 5000 })
+            ]);
+            opened = true;
+          } catch {}
+        }
+
+        // 1b) Если кнопки нет — открыть меню (три точки) и кликнуть «Отправить сообщение»
+        if (!opened) {
         const menuBtn = page.locator([
           'button[role="button"]:has(svg[aria-label])',
           'div[role="button"]:has(svg[aria-label])',
@@ -303,6 +327,7 @@ app.post("/run", (req, res) => enqueue(async () => {
           'div[role="dialog"] button:has-text("Send message")'
         ].join(', ')).first();
         try { await sendItem.click({ timeout: 6000 }); } catch {}
+        }
       }
 
       // 2) Явный поиск композера и кнопки «Отправить» на странице треда
