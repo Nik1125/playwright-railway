@@ -183,6 +183,74 @@ app.post("/run", (req, res) => enqueue(async () => {
       out.reachedEnd = still >= 4 || (Date.now() - started) >= timeoutMs || linksMap.size >= max;
       out.ok = out.count > 0;
     }
+    else if (action === "notificationsSubscribersLinks") {
+      const timeoutMs = Math.min(parseInt(req.body?.timeoutMs ?? 30000, 10) || 30000, 120000);
+      await page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
+
+      // попытка найти пункт меню «Уведомления» и красную точку (есть активные уведомления)
+      const notifNav = page.locator('a[role="link"]:has-text("Уведомления"), a[aria-label="Уведомления"]').first();
+      const hasNotif = await (async () => {
+        try {
+          if (!(await notifNav.count())) return false;
+          const red = notifNav.locator('[aria-label*="нов" i], [style*="rgb(237, 73, 86)"]');
+          return (await red.count()) > 0;
+        } catch { return false; }
+      })();
+
+      out.hasNotifications = hasNotif;
+      if (!hasNotif) { out.ok = true; out.links = []; out.count = 0; }
+      else {
+        try { await notifNav.click({ timeout: 5000 }); } catch {}
+        const dialog = page.locator('div[role="dialog"]').first();
+        await dialog.waitFor({ state: "visible", timeout: 8000 }).catch(()=>{});
+
+        // нажать «Фильтровать»
+        const filterBtn = page.locator('div[role="button"]:has-text("Фильтровать"), button:has-text("Фильтровать")').first();
+        try { await filterBtn.click({ timeout: 5000 }); } catch {}
+
+        // отметить чекбокс «Подписки» (или похожее слово)
+        const subCb = page.getByRole?.("checkbox", { name: /подпис/iu }) ?? page.locator('input[type="checkbox"]').locator('xpath=..').locator(':has-text("Подпис")');
+        try { if (await subCb.count()) { await subCb.first().check?.().catch(async()=>{ await subCb.first().click(); }); } } catch {}
+
+        // «Применить»
+        const applyBtn = page.locator('div[role="button"]:has-text("Применить"), button:has-text("Применить")').first();
+        try { await applyBtn.click({ timeout: 5000 }); } catch {}
+
+        // сбор ссылок из модалки
+        const started = Date.now();
+        const links = await (async () => {
+          const items = new Map();
+          while ((Date.now() - started) < timeoutMs) {
+            const batch = await page.evaluate(() => {
+              const root = document.querySelector('div[role="dialog"]') || document;
+              const anchors = Array.from(root.querySelectorAll('a[href^="/"]'));
+              const out = [];
+              for (const a of anchors) {
+                const h = a.getAttribute('href') || '';
+                if (!/^\/[A-Za-z0-9._]+\/?(\?[^#]*)?$/.test(h)) continue;
+                const uname = (h.match(/^\/([^\/\?]+)\//) || [null, null])[1];
+                if (!uname) continue;
+                const text = (a.textContent || '').trim();
+                out.push({ username: uname, href: h, text });
+              }
+              return out;
+            });
+            batch.forEach(i => items.set(i.username, i));
+            // прокрутка списка уведомлений вниз
+            const el = await dialog.elementHandle().catch(()=>null);
+            if (el) { await page.evaluate(e => e.scrollBy(0, e.scrollHeight), el).catch(()=>{}); }
+            await page.waitForTimeout(300);
+            if (items.size >= 100) break; // безопасный предел
+          }
+          return Array.from(items.values());
+        })();
+
+        out.links = links;
+        out.count = links.length;
+        out.hadModal = true;
+        out.ok = true;
+      }
+    }
      else {
       throw new Error(`unknown action: ${action}`);
     }
