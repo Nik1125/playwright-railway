@@ -301,11 +301,11 @@ app.post("/run", (req, res) => enqueue(async () => {
         if (await directBtn.count().catch(()=>0)) {
           try {
             await directBtn.scrollIntoViewIfNeeded().catch(()=>{});
-            await Promise.race([
-              page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(()=>{}),
-              directBtn.click({ timeout: 5000 })
-            ]);
-            opened = true;
+            const nav = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 6000 }).catch(()=>{});
+            await directBtn.click({ timeout: 5000 });
+            const composerAppeared = await page.locator('[placeholder*="Напишите" i], [placeholder*="message" i], [contenteditable="true"][role="textbox"], div[contenteditable="true"], textarea').first().waitFor({ state: 'visible', timeout: 6000 }).then(()=>true).catch(()=>false);
+            await nav;
+            opened = /\/direct\/t\//.test(page.url()) || composerAppeared;
           } catch {}
         }
 
@@ -326,7 +326,32 @@ app.post("/run", (req, res) => enqueue(async () => {
           'div[role="dialog"] [role="menuitem"]:has-text("Send message")',
           'div[role="dialog"] button:has-text("Send message")'
         ].join(', ')).first();
-        try { await sendItem.click({ timeout: 6000 }); } catch {}
+        try { await sendItem.click({ timeout: 6000 }); opened = true; } catch {}
+        }
+        // прямой линк на тред
+        if (!opened) {
+          const directLink = page.locator('a[href^="/direct/t/"]').first();
+          if (await directLink.count().catch(()=>0)) {
+            try {
+              await Promise.race([
+                page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(()=>{}),
+                directLink.click({ timeout: 5000 })
+              ]);
+              opened = /\/direct\/t\//.test(page.url());
+            } catch {}
+          }
+        }
+        // создать новый диалог через /direct/new/
+        if (!opened && uname) {
+          try {
+            await page.goto('https://www.instagram.com/direct/new/', { waitUntil: 'domcontentloaded' });
+            const search = page.locator('input[placeholder*="Поиск" i], input[placeholder*="Search" i], input[type="text"]').first();
+            await search.fill(uname, { timeout: 6000 }).catch(async()=>{ await search.type(uname, { delay: 25 }); });
+            const candidate = page.locator('div[role="dialog"] [role="button"], div[role="dialog"] [role="checkbox"], div[role="dialog"] li').filter({ hasText: new RegExp(`^${uname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, 'i') }).first();
+            await candidate.click({ timeout: 6000 }).catch(()=>{});
+            const nextBtn = page.locator('div[role=\"dialog\"] [role=\"button\"]:has-text(\"Далее\"), div[role=\"dialog\"] [role=\"button\"]:has-text(\"Next\"), button:has-text(\"Далее\"), button:has-text(\"Next\")').first();
+            await nextBtn.click({ timeout: 6000 }).catch(()=>{});
+          } catch {}
         }
       }
 
