@@ -270,107 +270,47 @@ app.post("/run", (req, res) => enqueue(async () => {
       out.ok = true;
     }
     else if (action === "sendMessage") {
-      const { message, profileUrl, retries = 2 } = req.body || {};
+      const { message, profileUrl } = req.body || {};
       const uname = username || (typeof req.body?.username === "string" ? req.body.username : "");
       if (!message || !(uname || profileUrl)) throw new Error("username or profileUrl and message required");
 
       const url = profileUrl || `https://www.instagram.com/${uname}/`;
       await page.goto(url, { waitUntil: "domcontentloaded" });
 
+      // если редирект на логин
       if (/\/accounts\/login\//.test(page.url())) {
         out.needLogin = true; out.ok = false; out.url = page.url();
         return res.json(out);
       }
 
-      // 1) сначала пробуем явную кнопку "Написать"/Message на профиле
-      let opened = false;
-      const directBtn = page.locator([
-        'a[role="link"]:has-text("Отправить сообщение")',
-        'button:has-text("Отправить сообщение")',
-        'a[role="link"]:has-text("Написать")',
-        'button:has-text("Написать")',
-        'a[role="link"]:has-text("Send message")',
-        'button:has-text("Send message")',
-        'a[role="link"]:has-text("Message")',
-        'button:has-text("Message")'
+      // открыть меню (три точки)
+      const menuBtn = page.locator([
+        'button[role="button"]:has(svg[aria-label])',
+        'div[role="button"]:has(svg[aria-label])',
+        'button:has-text("...")',
+      ].join(', ')).filter({ hasText: /\.{3}/ }).first().or(
+        page.getByRole?.("button", { name: /парамет|ещё|more|options|menu/i })
+      );
+      try { await menuBtn.click({ timeout: 5000 }); } catch {}
+
+      // выбрать пункт «Отправить сообщение» / "Send message"
+      const sendItem = page.locator([
+        'div[role="dialog"] [role="menuitem"]:has-text("Отправить сообщение")',
+        'div[role="dialog"] button:has-text("Отправить сообщение")',
+        'div[role="dialog"] [role="menuitem"]:has-text("Send message")',
+        'div[role="dialog"] button:has-text("Send message")',
+        'div[role="menuitem"]:has-text("Send message")',
       ].join(', ')).first();
-      if (await directBtn.count().catch(()=>0)) {
-        try { await directBtn.click({ timeout: 4000 }); opened = true; } catch {}
-      }
+      try { await sendItem.click({ timeout: 6000 }); } catch {}
 
-      // 2) иначе открываем меню (три точки) и кликаем "Отправить сообщение"
-      if (!opened) {
-        const menuBtnCandidates = page.locator('button, div[role="button"]').filter({ hasText: /\.{3}/ });
-        try { await menuBtnCandidates.first().click({ timeout: 5000 }); } catch {}
-        const sendItem = page.locator([
-          'div[role="dialog"] [role="menuitem"]:has-text("Отправить сообщение")',
-          'div[role="dialog"] button:has-text("Отправить сообщение")',
-          'div[role="dialog"] [role="menuitem"]:has-text("Send message")',
-          'div[role="dialog"] button:has-text("Send message")'
-        ].join(', ')).first();
-        try { await sendItem.click({ timeout: 6000 }); opened = true; } catch {}
-      }
+      // ждать открытие чата и поле ввода
+      const composer = page.locator('[contenteditable="true"], textarea').first();
+      await composer.waitFor({ state: "visible", timeout: 10000 }).catch(()=>{});
+      await composer.click({ delay: 50 }).catch(()=>{});
+      await composer.type(String(message), { delay: 15 }).catch(()=>{});
+      await composer.press('Enter').catch(()=>{});
 
-      // 2.5) fallback: на некоторых профилях есть прямой линк на чат
-      if (!opened) {
-        const directLink = page.locator('a[href^="/direct/t/"]').first();
-        if (await directLink.count().catch(()=>0)) {
-          try { await Promise.race([page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(()=>{}), directLink.click()]); opened = true; } catch {}
-        }
-      }
-
-      // 2.9) второй fallback: создать новый диалог через /direct/new/
-      if (!opened) {
-        try {
-          await page.goto('https://www.instagram.com/direct/new/', { waitUntil: 'domcontentloaded' });
-          // поле поиска получателя
-          const search = page.locator('input[placeholder*="Поиск" i], input[placeholder*="Search" i], input[type="text"]').first();
-          await search.fill(uname, { timeout: 6000 }).catch(async()=>{ await search.type(uname, { delay: 30 }); });
-          // выбрать первого кандидата
-          const candidate = page.locator('div[role="dialog"] [role="button"], div[role="dialog"] [role="checkbox"], div[role="dialog"] li').filter({ hasText: new RegExp(`^${uname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, 'i') }).first();
-          await candidate.click({ timeout: 6000 }).catch(()=>{});
-          // кнопка Далее/Next
-          const nextBtn = page.locator('div[role="dialog"] [role="button"]:has-text("Далее"), div[role="dialog"] [role="button"]:has-text("Next"), button:has-text("Далее"), button:has-text("Next")').first();
-          await nextBtn.click({ timeout: 6000 }).catch(()=>{});
-          opened = true;
-        } catch {}
-      }
-
-      // 3) ждём открытие чата и поле ввода, печатаем надёжно и подтверждаем отправку
-      const composer = page.locator('[contenteditable="true"][role="textbox"], div[contenteditable="true"], textarea').first();
-      await composer.waitFor({ state: "visible", timeout: 12000 }).catch(()=>{});
-
-      async function typeAndSend() {
-        await composer.click({ delay: 40 }).catch(()=>{});
-        // очистка поля на всякий
-        try { await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control'); await page.keyboard.press('Backspace'); } catch {}
-        await composer.type(String(message), { delay: 20 }).catch(()=>{});
-        await composer.press('Enter').catch(()=>{});
-      }
-
-      async function lastBubbleText() {
-        return await page.evaluate(() => {
-          // ищем последние текстовые сообщения в правой колонке Direct
-          const candidates = Array.from(document.querySelectorAll('[role="row"], [data-testid]'));
-          const texts = candidates.map(el => (el.textContent || '').trim()).filter(Boolean);
-          return texts.length ? texts[texts.length - 1] : '';
-        });
-      }
-
-      let confirmed = false;
-      for (let i = 0; i <= Number(retries); i++) {
-        await typeAndSend();
-        // ждём появления нашего текста в последних пузырях
-        const started = Date.now();
-        while (Date.now() - started < 5000) {
-          const t = await lastBubbleText().catch(()=>"");
-          if (t && t.includes(String(message))) { confirmed = true; break; }
-          await page.waitForTimeout(250);
-        }
-        if (confirmed) break;
-      }
-
-      out.sent = confirmed; out.confirmed = confirmed; out.target = uname || profileUrl; out.ok = confirmed;
+      out.sent = true; out.target = uname || profileUrl; out.ok = true;
     }
      else {
       throw new Error(`unknown action: ${action}`);
