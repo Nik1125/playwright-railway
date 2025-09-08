@@ -269,6 +269,49 @@ app.post("/run", (req, res) => enqueue(async () => {
       out.count = out.links.length;
       out.ok = true;
     }
+    else if (action === "sendMessage") {
+      const { message, profileUrl } = req.body || {};
+      const uname = username || (typeof req.body?.username === "string" ? req.body.username : "");
+      if (!message || !(uname || profileUrl)) throw new Error("username or profileUrl and message required");
+
+      const url = profileUrl || `https://www.instagram.com/${uname}/`;
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+
+      // если редирект на логин
+      if (/\/accounts\/login\//.test(page.url())) {
+        out.needLogin = true; out.ok = false; out.url = page.url();
+        return res.json(out);
+      }
+
+      // открыть меню (три точки)
+      const menuBtn = page.locator([
+        'button[role="button"]:has(svg[aria-label])',
+        'div[role="button"]:has(svg[aria-label])',
+        'button:has-text("...")',
+      ].join(', ')).filter({ hasText: /\.{3}/ }).first().or(
+        page.getByRole?.("button", { name: /парамет|ещё|more|options|menu/i })
+      );
+      try { await menuBtn.click({ timeout: 5000 }); } catch {}
+
+      // выбрать пункт «Отправить сообщение» / "Send message"
+      const sendItem = page.locator([
+        'div[role="dialog"] [role="menuitem"]:has-text("Отправить сообщение")',
+        'div[role="dialog"] button:has-text("Отправить сообщение")',
+        'div[role="dialog"] [role="menuitem"]:has-text("Send message")',
+        'div[role="dialog"] button:has-text("Send message")',
+        'div[role="menuitem"]:has-text("Send message")',
+      ].join(', ')).first();
+      try { await sendItem.click({ timeout: 6000 }); } catch {}
+
+      // ждать открытие чата и поле ввода
+      const composer = page.locator('[contenteditable="true"], textarea').first();
+      await composer.waitFor({ state: "visible", timeout: 10000 }).catch(()=>{});
+      await composer.click({ delay: 50 }).catch(()=>{});
+      await composer.type(String(message), { delay: 15 }).catch(()=>{});
+      await composer.press('Enter').catch(()=>{});
+
+      out.sent = true; out.target = uname || profileUrl; out.ok = true;
+    }
      else {
       throw new Error(`unknown action: ${action}`);
     }
