@@ -81,13 +81,40 @@ app.post("/run", (req, res) => enqueue(async () => {
     if (action === "loginCheck") {
       await page.goto("https://www.instagram.com/", { waitUntil: "domcontentloaded" });
       out.url = page.url(); out.title = await page.title();
-      out.apiStatus = await page.evaluate(async () => {
+
+      // 1) Быстрый признак: есть ли auth‑cookie в persistent context
+      try {
+        const cookies = await context.cookies?.("https://www.instagram.com");
+        const names = (cookies || []).map(c => c.name);
+        out.cookieNames = names;
+        out.hasAuthCookie = names.includes("sessionid") || names.includes("ds_user_id");
+      } catch {}
+
+      // 2) Проверяем несколько API точек
+      const { apiStatus, currentUserStatus } = await page.evaluate(async () => {
+        const res = { apiStatus: -1, currentUserStatus: -1 };
         try {
           const r = await fetch("/api/v1/accounts/edit/web_form_data/", { credentials: "include" });
-          return r.status;
-        } catch { return -1; }
+          res.apiStatus = r.status;
+        } catch {}
+        try {
+          const r2 = await fetch("/api/v1/web/accounts/current_user/?no_ring=true", { credentials: "include" });
+          res.currentUserStatus = r2.status;
+        } catch {}
+        return res;
       });
-      out.isLoggedIn = out.apiStatus === 200;
+      out.apiStatus = apiStatus;
+      out.currentUserStatus = currentUserStatus;
+
+      // 3) Прямой редирект на страницу логина при переходах
+      const redirectedToLogin = /\/accounts\/login\//.test(out.url);
+      out.redirectedToLogin = redirectedToLogin;
+
+      out.isLoggedIn = Boolean(
+        (!redirectedToLogin) && (
+          out.hasAuthCookie || apiStatus === 200 || currentUserStatus === 200
+        )
+      );
       out.ok = true;
 
     } else if (action === "openSettings") {
