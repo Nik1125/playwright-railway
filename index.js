@@ -67,7 +67,7 @@ app.post("/seed-cookies", (req, res) => enqueue(async () => {
 
 // universal runner with few actions
 app.post("/run", (req, res) => enqueue(async () => {
-  const { action = "loginCheck", username, targetUser, needScreenshot = true } = req.body || {};
+  const { action = "loginCheck", username, targetUser, needScreenshot = false } = req.body || {};
   const context = await ensureContext();
 
   const page = await context.newPage();
@@ -186,6 +186,7 @@ app.post("/run", (req, res) => enqueue(async () => {
     else if (action === "notificationsSubscribersLinks") {
       const timeoutMs = Math.min(parseInt(req.body?.timeoutMs ?? 30000, 10) || 30000, 120000);
       const max = Math.min(parseInt(req.body?.max ?? 300, 10) || 300, 2000);
+      const todayOnly = true; // собираем только блок «Сегодня/Today»
       // Переходим на публичную страницу уведомлений
       await page.goto('https://www.instagram.com/notifications/', { waitUntil: 'domcontentloaded' }).catch(()=>{});
 
@@ -205,19 +206,37 @@ app.post("/run", (req, res) => enqueue(async () => {
         await page.waitForTimeout(350 + Math.floor(Math.random()*250));
       }
 
-      async function collectOnce() {
+      async function collectTodaySection() {
         return await page.evaluate(() => {
+          function findTodayHeading() {
+            const candidates = Array.from(document.querySelectorAll('[role="heading"], h1, h2, h3, div[role="heading"]'));
+            return candidates.find(el => /^(сегодня|today)\b/i.test((el.textContent || '').trim()));
+          }
+          const todayHeading = findTodayHeading();
+          if (!todayHeading) return [];
+          // собрать узлы раздела до следующего заголовка
+          const sectionNodes = [];
+          let node = todayHeading.parentElement?.nextElementSibling || todayHeading.nextElementSibling;
+          while (node) {
+            const isHeading = node.matches?.('[role="heading"], h1, h2, h3, div[role="heading"]');
+            if (isHeading) break;
+            sectionNodes.push(node);
+            node = node.nextElementSibling;
+          }
           const items = [];
-          const blocks = Array.from(document.querySelectorAll('[data-pressable-container="true"]'));
-          for (const b of blocks) {
-            const a = b.querySelector('a[href^="/"]');
-            if (!a) continue;
-            const href = a.getAttribute('href') || '';
-            const m = href.match(/^\/([^\/\?]+)\/?/);
-            const username = m ? m[1] : null;
-            if (!username) continue;
-            const text = (b.textContent || '').trim();
-            items.push({ username, href, text });
+          const searchRoots = sectionNodes.length ? sectionNodes : [todayHeading.parentElement || document.body];
+          for (const root of searchRoots) {
+            const blocks = Array.from(root.querySelectorAll('[data-pressable-container="true"]'));
+            for (const b of blocks) {
+              const a = b.querySelector('a[href^="/"]');
+              if (!a) continue;
+              const href = a.getAttribute('href') || '';
+              const m = href.match(/^\/([^\/\?]+)\/?/);
+              const username = m ? m[1] : null;
+              if (!username) continue;
+              const text = (b.textContent || '').trim();
+              items.push({ username, href, text });
+            }
           }
           return Array.from(new Map(items.map(i => [i.username+"|"+i.text, i])).values());
         });
@@ -225,9 +244,12 @@ app.post("/run", (req, res) => enqueue(async () => {
 
       const started = Date.now();
       const map = new Map();
-      while ((Date.now() - started) < timeoutMs && map.size < max) {
-        const batch = await collectOnce();
+      let last = 0, still = 0;
+      while ((Date.now() - started) < timeoutMs && map.size < max && still < 4) {
+        const batch = await collectTodaySection();
         batch.forEach(i => map.set(i.username+"|"+i.text, i));
+        if (map.size === last) still++; else still = 0;
+        last = map.size;
         await scrollDown();
       }
 
