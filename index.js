@@ -270,47 +270,82 @@ app.post("/run", (req, res) => enqueue(async () => {
       out.ok = true;
     }
     else if (action === "sendMessage") {
-      const { message, profileUrl } = req.body || {};
+      const { message, profileUrl, retries = 2 } = req.body || {};
       const uname = username || (typeof req.body?.username === "string" ? req.body.username : "");
       if (!message || !(uname || profileUrl)) throw new Error("username or profileUrl and message required");
 
       const url = profileUrl || `https://www.instagram.com/${uname}/`;
       await page.goto(url, { waitUntil: "domcontentloaded" });
 
-      // если редирект на логин
       if (/\/accounts\/login\//.test(page.url())) {
         out.needLogin = true; out.ok = false; out.url = page.url();
         return res.json(out);
       }
 
-      // открыть меню (три точки)
-      const menuBtn = page.locator([
-        'button[role="button"]:has(svg[aria-label])',
-        'div[role="button"]:has(svg[aria-label])',
-        'button:has-text("...")',
-      ].join(', ')).filter({ hasText: /\.{3}/ }).first().or(
-        page.getByRole?.("button", { name: /парамет|ещё|more|options|menu/i })
-      );
-      try { await menuBtn.click({ timeout: 5000 }); } catch {}
-
-      // выбрать пункт «Отправить сообщение» / "Send message"
-      const sendItem = page.locator([
-        'div[role="dialog"] [role="menuitem"]:has-text("Отправить сообщение")',
-        'div[role="dialog"] button:has-text("Отправить сообщение")',
-        'div[role="dialog"] [role="menuitem"]:has-text("Send message")',
-        'div[role="dialog"] button:has-text("Send message")',
-        'div[role="menuitem"]:has-text("Send message")',
+      // 1) сначала пробуем явную кнопку "Написать"/Message на профиле
+      let opened = false;
+      const directBtn = page.locator([
+        'a[role="link"]:has-text("Отправить сообщение")',
+        'button:has-text("Отправить сообщение")',
+        'a[role="link"]:has-text("Написать")',
+        'button:has-text("Написать")',
+        'a[role="link"]:has-text("Send message")',
+        'button:has-text("Send message")',
+        'a[role="link"]:has-text("Message")',
+        'button:has-text("Message")'
       ].join(', ')).first();
-      try { await sendItem.click({ timeout: 6000 }); } catch {}
+      if (await directBtn.count().catch(()=>0)) {
+        try { await directBtn.click({ timeout: 4000 }); opened = true; } catch {}
+      }
 
-      // ждать открытие чата и поле ввода
-      const composer = page.locator('[contenteditable="true"], textarea').first();
-      await composer.waitFor({ state: "visible", timeout: 10000 }).catch(()=>{});
-      await composer.click({ delay: 50 }).catch(()=>{});
-      await composer.type(String(message), { delay: 15 }).catch(()=>{});
-      await composer.press('Enter').catch(()=>{});
+      // 2) иначе открываем меню (три точки) и кликаем "Отправить сообщение"
+      if (!opened) {
+        const menuBtnCandidates = page.locator('button, div[role="button"]').filter({ hasText: /\.{3}/ });
+        try { await menuBtnCandidates.first().click({ timeout: 5000 }); } catch {}
+        const sendItem = page.locator([
+          'div[role="dialog"] [role="menuitem"]:has-text("Отправить сообщение")',
+          'div[role="dialog"] button:has-text("Отправить сообщение")',
+          'div[role="dialog"] [role="menuitem"]:has-text("Send message")',
+          'div[role="dialog"] button:has-text("Send message")'
+        ].join(', ')).first();
+        try { await sendItem.click({ timeout: 6000 }); opened = true; } catch {}
+      }
 
-      out.sent = true; out.target = uname || profileUrl; out.ok = true;
+      // 3) ждём открытие чата и поле ввода, печатаем надёжно и подтверждаем отправку
+      const composer = page.locator('[contenteditable="true"][role="textbox"], div[contenteditable="true"], textarea').first();
+      await composer.waitFor({ state: "visible", timeout: 12000 }).catch(()=>{});
+
+      async function typeAndSend() {
+        await composer.click({ delay: 40 }).catch(()=>{});
+        // очистка поля на всякий
+        try { await page.keyboard.down('Control'); await page.keyboard.press('KeyA'); await page.keyboard.up('Control'); await page.keyboard.press('Backspace'); } catch {}
+        await composer.type(String(message), { delay: 20 }).catch(()=>{});
+        await composer.press('Enter').catch(()=>{});
+      }
+
+      async function lastBubbleText() {
+        return await page.evaluate(() => {
+          // ищем последние текстовые сообщения в правой колонке Direct
+          const candidates = Array.from(document.querySelectorAll('[role="row"], [data-testid]'));
+          const texts = candidates.map(el => (el.textContent || '').trim()).filter(Boolean);
+          return texts.length ? texts[texts.length - 1] : '';
+        });
+      }
+
+      let confirmed = false;
+      for (let i = 0; i <= Number(retries); i++) {
+        await typeAndSend();
+        // ждём появления нашего текста в последних пузырях
+        const started = Date.now();
+        while (Date.now() - started < 5000) {
+          const t = await lastBubbleText().catch(()=>"");
+          if (t && t.includes(String(message))) { confirmed = true; break; }
+          await page.waitForTimeout(250);
+        }
+        if (confirmed) break;
+      }
+
+      out.sent = confirmed; out.confirmed = confirmed; out.target = uname || profileUrl; out.ok = confirmed;
     }
      else {
       throw new Error(`unknown action: ${action}`);
