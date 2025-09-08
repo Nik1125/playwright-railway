@@ -1,5 +1,7 @@
 import express from "express";
 import { chromium } from "playwright";
+import { readdir, stat } from "node:fs/promises";
+import path from "node:path";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -49,6 +51,22 @@ app.get("/health", async (_req, res) => {
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// debug: inspect profile directory contents (requires AUTH_TOKEN if set)
+app.get("/debug/profile", async (_req, res) => {
+  try {
+    const dir = USER_DATA_DIR;
+    const entries = await readdir(dir, { withFileTypes: true });
+    const items = await Promise.all(entries.map(async (d) => {
+      const p = path.join(dir, d.name);
+      const s = await stat(p).catch(() => null);
+      return { name: d.name, type: d.isDirectory() ? "dir" : "file", size: s?.size || 0 };
+    }));
+    res.json({ dir, exists: true, count: items.length, items });
+  } catch (e) {
+    res.json({ dir: USER_DATA_DIR, exists: false, error: e.message });
   }
 });
 
