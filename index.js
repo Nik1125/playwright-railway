@@ -212,6 +212,16 @@ app.post("/run", (req, res) => enqueue(async () => {
         await page.goto('https://www.instagram.com/accounts/activity/', { waitUntil: 'domcontentloaded' }).catch(()=>{});
       }
 
+      // если нас перекинуло на логин — сообщаем явно и выходим
+      const redirectedToLogin = /\/accounts\/login\//.test(page.url());
+      if (redirectedToLogin) {
+        out.needLogin = true;
+        out.ok = false;
+        out.url = page.url();
+        out.title = await page.title().catch(()=>null);
+        return res.json(out);
+      }
+
       {
         const dialog = page.locator('div[role="dialog"]').first();
         await dialog.waitFor({ state: "visible", timeout: 8000 }).catch(()=>{});
