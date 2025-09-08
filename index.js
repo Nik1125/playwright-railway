@@ -311,6 +311,31 @@ app.post("/run", (req, res) => enqueue(async () => {
         try { await sendItem.click({ timeout: 6000 }); opened = true; } catch {}
       }
 
+      // 2.5) fallback: на некоторых профилях есть прямой линк на чат
+      if (!opened) {
+        const directLink = page.locator('a[href^="/direct/t/"]').first();
+        if (await directLink.count().catch(()=>0)) {
+          try { await Promise.race([page.waitForNavigation({ waitUntil: 'domcontentloaded' }).catch(()=>{}), directLink.click()]); opened = true; } catch {}
+        }
+      }
+
+      // 2.9) второй fallback: создать новый диалог через /direct/new/
+      if (!opened) {
+        try {
+          await page.goto('https://www.instagram.com/direct/new/', { waitUntil: 'domcontentloaded' });
+          // поле поиска получателя
+          const search = page.locator('input[placeholder*="Поиск" i], input[placeholder*="Search" i], input[type="text"]').first();
+          await search.fill(uname, { timeout: 6000 }).catch(async()=>{ await search.type(uname, { delay: 30 }); });
+          // выбрать первого кандидата
+          const candidate = page.locator('div[role="dialog"] [role="button"], div[role="dialog"] [role="checkbox"], div[role="dialog"] li').filter({ hasText: new RegExp(`^${uname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, 'i') }).first();
+          await candidate.click({ timeout: 6000 }).catch(()=>{});
+          // кнопка Далее/Next
+          const nextBtn = page.locator('div[role="dialog"] [role="button"]:has-text("Далее"), div[role="dialog"] [role="button"]:has-text("Next"), button:has-text("Далее"), button:has-text("Next")').first();
+          await nextBtn.click({ timeout: 6000 }).catch(()=>{});
+          opened = true;
+        } catch {}
+      }
+
       // 3) ждём открытие чата и поле ввода, печатаем надёжно и подтверждаем отправку
       const composer = page.locator('[contenteditable="true"][role="textbox"], div[contenteditable="true"], textarea').first();
       await composer.waitFor({ state: "visible", timeout: 12000 }).catch(()=>{});
