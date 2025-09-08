@@ -207,7 +207,26 @@ app.post("/run", (req, res) => enqueue(async () => {
 
       async function collectOnce() {
         return await page.evaluate(() => {
-          const items = [];
+          const ONE_HOUR = 60 * 60 * 1000;
+          const ONE_DAY = 24 * ONE_HOUR;
+          const now = Date.now();
+
+          function parseAgeMsFromText(text) {
+            if (!text) return null;
+            const t = text.toLowerCase();
+            const re = /(\d+)\s*(сек|с|sec|second|seconds|мин|минут|m|min|minute|minutes|час|ч|hour|hours|дн|дней|day|days)/i;
+            const m = t.match(re);
+            if (!m) return null;
+            const n = parseInt(m[1], 10);
+            const unit = m[2];
+            if (/(сек|с|sec|second)/i.test(unit)) return n * 1000;
+            if (/(мин|m|min|minute)/i.test(unit)) return n * 60 * 1000;
+            if (/(час|ч|hour)/i.test(unit)) return n * ONE_HOUR;
+            if (/(дн|day)/i.test(unit)) return n * ONE_DAY;
+            return null;
+          }
+
+          const out = [];
           const blocks = Array.from(document.querySelectorAll('[data-pressable-container="true"]'));
           for (const b of blocks) {
             const a = b.querySelector('a[href^="/"]');
@@ -216,10 +235,25 @@ app.post("/run", (req, res) => enqueue(async () => {
             const m = href.match(/^\/([^\/\?]+)\/?/);
             const username = m ? m[1] : null;
             if (!username) continue;
+
             const text = (b.textContent || '').trim();
-            items.push({ username, href, text });
+            const t = b.querySelector('time');
+            let ageMs = null;
+            let ts = null;
+            if (t && (t.dateTime || t.getAttribute('datetime'))) {
+              ts = new Date(t.dateTime || t.getAttribute('datetime')).getTime();
+              if (!Number.isNaN(ts)) ageMs = now - ts;
+            }
+            if (ageMs == null) {
+              ageMs = parseAgeMsFromText(text);
+              if (ageMs != null) ts = now - ageMs;
+            }
+            if (ageMs == null) continue;
+            if (ageMs > ONE_DAY) continue;
+
+            out.push({ username, href, text, ageMs, timestamp: ts });
           }
-          return Array.from(new Map(items.map(i => [i.username+"|"+i.text, i])).values());
+          return Array.from(new Map(out.map(i => [i.username+"|"+i.text, i])).values());
         });
       }
 
