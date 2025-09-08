@@ -330,9 +330,9 @@ app.post("/run", (req, res) => enqueue(async () => {
 
       // 1) Если мы уже на странице треда, сразу ищем composer
       const onThread = /\/direct\/t\//.test(page.url());
+      let opened = onThread;
       if (!onThread) {
         // 1a) Сначала пробуем явную кнопку «Отправить сообщение»/Message на профиле
-        let opened = false;
         const directBtn = page.locator([
           '[role="button"]:has-text("Отправить сообщение")',
           'button:has-text("Отправить сообщение")',
@@ -398,6 +398,16 @@ app.post("/run", (req, res) => enqueue(async () => {
             await nextBtn.click({ timeout: 6000 }).catch(()=>{});
           } catch {}
         }
+      }
+
+      // если ни один путь не сработал — явно сообщаем об ограничении IG
+      if (!opened) {
+        out.ok = false;
+        out.sent = false;
+        out.confirmed = false;
+        out.cannotSendDueToRestrictions = true;
+        out.reason = "Instagram ограничивает отправку: кнопка сообщения отсутствует для этого профиля";
+        return res.json(out);
       }
 
       // 2) Явный поиск композера и кнопки «Отправить» на странице треда
